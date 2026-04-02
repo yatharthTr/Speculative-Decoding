@@ -5,6 +5,8 @@ from transformers.cache_utils import DynamicCache
 from utils.caching import prune_cache
 import utils.printing as printing
 from typing import List, Tuple
+import time
+
 
 
 def max_fn(x: torch.Tensor) -> torch.Tensor:
@@ -34,6 +36,7 @@ def speculative_generate(
     skip_sample_adjustment: bool = False,
     first_target: bool = True,
     debug: bool = False,
+    # beta: float=0.60
 ) -> Tuple[List[int], float]:
     """
     Generate text sequence using the speculative decoding algorithm.
@@ -101,9 +104,34 @@ def speculative_generate(
         
         if debug:
             printing.initial_step(t, tokenizer)
-    
+    count_draft=0
+    count_speculated=0
+    epsilon = 1e-6
+    preceding_alpha=0
+    prev_gamma=gamma
+    found=False
+    extra_time=0
+    count=0
+    lt_gamma=[]
+    preceding_alpha=0
+    sum_gamma=0
+    alpha=0
+    coll_alpha=0
+    alpha_list=[]
+    n_collector=[] # no of tokeens accepted collecting it for calculating the expectation of the next predicted gamma
+    expectation_sum=0
+    expectation_sum_next=0
+    count_till_ex=0
+    decode_steps=[]
+    decode_steps_new=[]
+    expectation_collector=[]
     while current_position < total_len:
+        count+=1
+        count_till_ex+=1
         corrected_gamma = min(gamma, total_len - current_position - 1)
+        print(corrected_gamma)
+        sum_gamma+=corrected_gamma
+        lt_gamma.append(corrected_gamma)
         q = torch.zeros((1, corrected_gamma, vocabulary_size), device=target.device)
         
         input_ids = input_ids.to(drafter.device)
@@ -145,14 +173,146 @@ def speculative_generate(
                 break
         
         drafts_accepted += n
-        
+        print("drafts_accepted_iteratively= ", n, "drafts_accepted= ", drafts_accepted, "gamma= ", corrected_gamma)
+        # # print("p= ", p,"q= ", q)
+        # start=time.time()
+        # p_copy = p.clone()
+        # q_copy = q.clone()
+        # # print("p_copy ", p_copy)
+        # # print("q_copy ", q_copy)
+        # min_pq = torch.minimum(p_copy, q_copy)  
+        # alpha_t = min_pq.sum(dim=-1)
+        # # print(sum_gamma)
+        # alpha_t=alpha_t.mean().item()
+        # coll_alpha+=(alpha_t.mean().item())*corrected_gamma
+        # alpha = coll_alpha/sum_gamma
+        # end=time.time()
+        # expectation_sum+=(1-alpha_t**(corrected_gamma+1))/(1-alpha_t)
+        # n_collector.append(alpha_t)
+        # end=time.time()
+        ## New here for calculating the theoretical no.of steps for decoding
+        # alpha_itr = n/corrected_gamma
+        # if(alpha_itr==1):
+        #     expectation_sum+=corrected_gamma+1
+        #     # expectation_sum_next+=
+        # else:
+        #     expectation_sum+=(1-alpha_itr**(corrected_gamma+1))/(1-alpha_itr)
+
+        count_till_ex += 1
+        # expectation_collector.append(expectation_sum)
+        # done here
+
+        if((drafts_accepted - count_draft)>=1):
+        #     # print(f"Average alpha (E[min(p,q)]) across all positions = {alpha:.6f}")
+        #     # alpha=0
+        #     # sum_gamma=0
+            # alpha=drafts_accepted/drafts_speculated
+            lt_gamma.append([corrected_gamma,count_till_ex])
+            # expectation_mean = expectation_sum/count_till_ex
+            if(preceding_alpha==0):
+                preceding_alpha=alpha
+            # alpha=0.9*alpha+0.1*preceding_alpha
+            alpha=0.9*(drafts_accepted-count_draft)/(drafts_speculated-count_speculated) + 0.1*preceding_alpha
+            # alpha=0.9*(drafts_accepted)/(drafts_speculated) + 0.1*preceding_alpha
+
+            alpha_list.append(alpha)
+            preceding_alpha=alpha
+
+            sp=[]
+            # print(alpha)
+            i=2
+            
+            while (i<20):
+                if(alpha==1):
+                    break
+                sp_ele=(1-alpha**(i+1))/((1-alpha)*(i*(0.08799)+1))
+                sp.append(sp_ele)
+                i+=1
+            print(sp)
+            start_ji=time.time()
+            # print("prev_gamma: ", prev_gamma)
+            if(alpha==1):
+                gamma=gamma
+                found=True
+            
+            else:  
+            
+                for j in range(len(sp)):
+                    if(max(sp)>1):
+                        if(sp[prev_gamma-2]<1):
+                            gamma=gamma-1
+                            found=True
+                            break
+                            
+                        elif(sp[j]>1 and (sp.index(sp[j])+2-prev_gamma)==1):
+                            gamma= sp.index(sp[j])+2
+                            found=True
+                            break
+                        # elif(sp[j]>1 and (sp.index(sp[j])+2-prev_gamma)==2):
+                        #     gamma= sp.index(sp[j])+2
+                        #     found=True
+                        
+                    
+                    elif(abs(sp.index(max(sp))+2-prev_gamma)>1):
+                        gamma+=1
+                
+                        if((prev_gamma-sp.index(max(sp))-2)>1):
+                            gamma-=2
+                        found=True
+                        break
+            # New here for calculating the theoretical no.of steps for decoding
+            # print("length of n_collector: ", len(n_collector))
+            # print(n_collector)
+            # print(gamma)
+            # for i in range(len(n_collector)):
+            #     # alpha_itr = n_collector[i]/corrected_gamman_collector[i]
+            #     expectation_sum_next += (1-n_collector[i]**(5))/(1-n_collector[i])
+            #     # if(alpha_itr==1):
+            #     #     expectation_sum_next += gamma+1
+            #     # else:
+            #     #     expectation_sum_next += (1-alpha_itr**(gamma+1))/(1-alpha_itr)
+            # expectation_mean_next = expectation_sum_next/count_till_ex
+            # decode_steps.append((drafts_accepted - count_draft)/expectation_mean)
+            # decode_steps_new.append((drafts_accepted - count_draft)/expectation_mean_next)
+            # print("Theoretical decode steps with Yi: ", (drafts_accepted - count_draft)/expectation_mean)
+            # print("Theoretical decode steps with Yi+1: ", (drafts_accepted - count_draft)/expectation_mean_next)
+            # done here
+            end_ji=time.time()
+            extra_time+=(end_ji-start_ji)#+end-start
+            # if(found==False):
+            #     gamma=sp.index(max(sp))+2
+            # gamma=sp.index(max(sp))+2
+            # if(gamma==2):
+            #     gamma=4
+            # print("aaya to hu bro")
+            count_draft=drafts_accepted
+            preceding_alpha=alpha
+            count_speculated=drafts_speculated
+            prev_gamma=gamma
+            coll_alpha=0
+            sum_gamma=0
+            expectation_sum_next=0
+            expectation_sum=0
+            n_collector=[]
+            count_till_ex=0
+
+        # yha se commentout kro/ yha se comment in kro
+            # expectation=(1-alpha**(corrected_gamma+1))/(1-alpha)
+        #     print(f"Average alpha (E[min(p,q)]) across all positions = {alpha:.6f}")
+        #     # print("Expectation: ", expectation)
+            
+
+
+
+
         # check if the end token is in the drafts
         stop_locations = torch.nonzero(torch.eq(input_ids[..., current_position:current_position + n], stop_tokens))
         if stop_locations.shape[0] > 0:
             stop_location = stop_locations[0, 1].item()
             if debug:
                 printing.end_token_found(stop_location)
-            return input_ids[0, prompt_len:current_position + stop_location + 1].tolist(), drafts_accepted / drafts_speculated
+            # print("count: ", count)
+            return input_ids[0, prompt_len:current_position + stop_location + 1].tolist(), drafts_accepted / drafts_speculated, extra_time, count, lt_gamma #, alpha_list, decode_steps, decode_steps_new
 
         # adjust the distribution from Mp
         if n == corrected_gamma:
@@ -184,6 +344,8 @@ def speculative_generate(
         if torch.isin(x, stop_tokens):
             if debug:
                 printing.end_token_found(n)
-            return input_ids[0, prompt_len:current_position].tolist(), drafts_accepted / drafts_speculated
-    
-    return input_ids[0, prompt_len:].tolist(), drafts_accepted / drafts_speculated
+            # print("count: ", count)
+            return input_ids[0, prompt_len:current_position].tolist(), drafts_accepted / drafts_speculated, extra_time, count, lt_gamma#, alpha_list, decode_steps, decode_steps_new
+    # print("count: ", count)
+    return input_ids[0, prompt_len:].tolist(), drafts_accepted / drafts_speculated, extra_time, count, lt_gamma#, alpha_list, decode_steps, decode_steps_new
+
